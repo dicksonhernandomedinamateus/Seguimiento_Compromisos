@@ -2,6 +2,7 @@ import math
 import re
 from datetime import date, datetime, timedelta
 from html import escape as esc
+import uuid
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -11,16 +12,19 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # --- CONEXIÓN A GOOGLE SHEETS ---
-try:
-    credenciales_dict = json.loads(st.secrets["google_sheets_cred"])
-    alcance = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-    credenciales = Credentials.from_service_account_info(credenciales_dict, scopes=alcance)
-    cliente = gspread.authorize(credenciales)
-    
-    # Conectamos con el ID de tu archivo
-    hoja_db = cliente.open_by_key("1mfFWfyTRnwBkavxfD_nUDZch1S9bnA8ODmAoXmMnUfo").sheet1
-except Exception as e:
-    st.error("Error conectando a la base de datos. Verifica los Secrets.")
+@st.cache_resource
+def init_gsheets():
+    try:
+        credenciales_dict = json.loads(st.secrets["google_sheets_cred"])
+        alcance = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+        credenciales = Credentials.from_service_account_info(credenciales_dict, scopes=alcance)
+        cliente = gspread.authorize(credenciales)
+        return cliente.open_by_key("1mfFWfyTRnwBkavxfD_nUDZch1S9bnA8ODmAoXmMnUfo").sheet1
+    except Exception as e:
+        st.error("Error conectando a la base de datos. Verifica los Secrets.")
+        return None
+
+hoja_db = init_gsheets()
 # --------------------------------
 
 st.set_page_config(page_title="Sinergia", page_icon="🧭", layout="centered",
@@ -98,7 +102,7 @@ button[data-baseweb="tab"][aria-selected="true"] p{color:var(--navy)}
 .sn-kpi span{font-size:.7rem;color:var(--mut)}
 .sn-kpi.o b{color:var(--orange)}.sn-kpi.g b{color:var(--green)}.sn-kpi.b b{color:var(--blue)}
 
-/* tarjetas de tarea (contenedor con borde de Streamlit) */
+/* tarjetas de tarea */
 div[data-testid="stVerticalBlockBorderWrapper"]{background:#fff;border:0!important;border-radius:22px!important;box-shadow:0 6px 20px rgba(11,37,69,.09);padding:.2rem .15rem}
 .sn-row{display:flex;justify-content:space-between;align-items:center;gap:.5rem}
 .sn-cat{font-size:.74rem;color:var(--mut);font-weight:600;display:flex;align-items:center;gap:.4rem}
@@ -128,7 +132,7 @@ div[data-testid="stVerticalBlockBorderWrapper"]{background:#fff;border:0!importa
 .sn-empty b{display:block;font:700 1rem 'Sora';color:var(--navy);margin-bottom:.2rem}
 .sn-dlg-t{font:600 .95rem 'Sora'}.sn-dlg-s{font-size:.78rem;color:var(--mut);margin:.2rem 0 .4rem}
 
-/* botones (objetivo táctil ≥ 48px) */
+/* botones */
 .stButton>button,.stFormSubmitButton>button{width:100%;min-height:48px;border-radius:14px;font:700 .9rem 'Sora';border:1.5px solid #D5DEEA;background:#fff;color:var(--navy);transition:transform .08s}
 .stButton>button:active,.stFormSubmitButton>button:active{transform:scale(.97)}
 button[kind^="primary"],button[data-testid^="stBaseButton-primary"]{background:linear-gradient(135deg,#0B2E5C,#1B5FAA)!important;color:#fff!important;border:0!important;box-shadow:0 8px 18px rgba(11,46,92,.28)}
@@ -145,7 +149,7 @@ div[role="dialog"]{border-radius:26px!important}
 """
 st.markdown(CSS, unsafe_allow_html=True)
 
-# Metas PWA (barra de estado, pantalla completa al "Añadir a inicio")
+# Metas PWA
 components.html("""<script>
 const d=window.parent.document,h=d.head;
 [["theme-color","#0B2545"],["apple-mobile-web-app-capable","yes"],["mobile-web-app-capable","yes"],
@@ -154,60 +158,105 @@ const d=window.parent.document,h=d.head;
 let m=h.querySelector('meta[name="'+n+'"]');if(!m){m=d.createElement('meta');m.name=n;h.appendChild(m)}m.content=c});
 </script>""", height=0)
 
-
 def md(html: str):
     """Renderiza HTML sin que Markdown lo interprete como bloque de código."""
     st.markdown(re.sub(r"\n\s*", "", html), unsafe_allow_html=True)
 
+# ───────────────────────── LÓGICA DE BASE DE DATOS ─────────────────────────
+@st.cache_data(ttl=5) # Refresca datos cada 5 seg de Google Sheets para no saturar la API
+def obtener_datos_db():
+    if hoja_db is None: return []
+    try:
+        registros = hoja_db.get_all_records()
+    except:
+        return []
+    
+    parsed = []
+    for r in registros:
+        # Formatear la fecha límite
+        try: 
+            fecha_lim = datetime.strptime(str(r["due"]), "%Y-%m-%d").date()
+        except: 
+            fecha_lim = TODAY
+            
+        # Función para castear fechas con hora
+        def cast_dt(val):
+            if not val: return None
+            try: return datetime.strptime(str(val), "%Y-%m-%d %H:%M")
+            except: return None
+            
+        parsed.append({
+            "id": str(r["id"]),
+            "title": str(r["title"]),
+            "cat": str(r["cat"]),
+            "prio": str(r["prio"]),
+            "due": fecha_lim,
+            "status": str(r["status"]) or "pendiente",
+            "submitted_at": cast_dt(r.get("submitted_at")),
+            "closed_at": cast_dt(r.get("closed_at")),
+            "link": str(r.get("link", "")),
+            "note": str(r.get("note", "")),
+            "jefe_msg": str(r.get("jefe_msg", ""))
+        })
+    return parsed
 
-# ───────────────────────── Datos limpios ─────────────────────────
-def mk(i, title, cat, prio, off, status="pendiente", sub=None, link="", note="", cerrado=None, msg=""):
-    f = lambda h: NOW - timedelta(hours=h) if h is not None else None
-    return dict(id=i, title=title, cat=cat, prio=prio, due=TODAY + timedelta(days=off), status=status,
-                submitted_at=f(sub), closed_at=f(cerrado), link=link, note=note, jefe_msg=msg)
+def agregar_bd(titulo, cat, prio, due):
+    new_id = str(uuid.uuid4())[:8]
+    try:
+        hoja_db.append_row([new_id, titulo, cat, prio, due.strftime("%Y-%m-%d"), "pendiente", "", "", "", "", ""])
+        obtener_datos_db.clear() # Fuerza a recargar la tabla nueva
+    except Exception as e:
+        st.error(f"Error guardando: {e}")
+
+def actualizar_bd(tid, updates):
+    try:
+        registros = hoja_db.get_all_records()
+        row_idx = next((i + 2 for i, r in enumerate(registros) if str(r["id"]) == str(tid)), None)
+        if not row_idx: return
+        
+        # Mapeo de columnas exactas de Google Sheets
+        col_map = {"status": 6, "submitted_at": 7, "closed_at": 8, "link": 9, "note": 10, "jefe_msg": 11}
+        for k, v in updates.items():
+            if k in col_map:
+                hoja_db.update_cell(row_idx, col_map[k], v)
+        obtener_datos_db.clear()
+    except Exception as e:
+        st.error(f"Error actualizando: {e}")
 
 
-def init():
-    # Inicialización limpia de la base de datos
-    if "tasks" in st.session_state:
-        return
-    st.session_state.tasks = []
-    st.session_state.weeks = [True]  # Una racha positiva inicial por defecto
-    st.session_state.seq = 1
+# --- INICIALIZACIÓN ---
+if "weeks" not in st.session_state:
+    st.session_state.weeks = [True] # Racha para la UI
 
-init()
 S = st.session_state
-tasks = S.tasks
+tasks = obtener_datos_db()
+
 by = lambda s: [t for t in tasks if t["status"] == s]
 get = lambda i: next(t for t in tasks if t["id"] == i)
 days_left = lambda t: (t["due"] - TODAY).days
 on_time = lambda t: t["submitted_at"].date() <= t["due"]
 
-
 def eficiencia():
     sub = [t for t in tasks if t["submitted_at"]]
     return round(100 * sum(on_time(t) for t in sub) / len(sub)) if sub else 100
 
-
 def racha():
-    cur_ok = not any(days_left(t) < 0 for t in by("pendiente"))
+    pendientes = by("pendiente")
+    cur_ok = True
+    if pendientes:
+        cur_ok = not any(days_left(t) < 0 for t in pendientes)
     n = 0
     for w in reversed(S.weeks):
-        if not w:
-            break
+        if not w: break
         n += 1
     return n + (1 if cur_ok else 0), cur_ok
-
 
 # ───────────────────────── Componentes HTML ─────────────────────────
 def due_pill(t):
     d = days_left(t)
-    if d < 0:
-        return f'<span class="sn-pill o">Vencido hace {-d} d</span>'
-    if d <= 1:
-        return f'<span class="sn-pill o">{"Vence hoy" if d == 0 else "Vence mañana"}</span>'
+    if d < 0: return f'<span class="sn-pill o">Vencido hace {-d} d</span>'
+    if d <= 1: return f'<span class="sn-pill o">{"Vence hoy" if d == 0 else "Vence mañana"}</span>'
     return f'<span class="sn-pill b">Vence en {d} días</span>'
-
 
 def stepper(status):
     step = {"pendiente": 1, "revision": 2, "cerrado": 4}[status]
@@ -217,17 +266,12 @@ def stepper(status):
         out += f'<div class="sn-st {cls}"><i></i>{l}</div>'
     return f'<div class="sn-stepper">{out}</div>'
 
-
 def evidence(t):
-    if not (t["link"] or t["note"]):
-        return ""
-    link = ""
-    if t["link"]:
-        link = f'<a href="{esc(t["link"])}" target="_blank" rel="noopener">Abrir evidencia</a>'
+    if not (t["link"] or t["note"]): return ""
+    link = f'<a href="{esc(t["link"])}" target="_blank" rel="noopener">Abrir evidencia</a>' if t["link"] else ""
     note = f'<div style="margin-top:.2rem">{esc(t["note"])}</div>' if t["note"] else ""
-    stamp = t["submitted_at"].strftime("%d/%m/%Y %H:%M")
+    stamp = t["submitted_at"].strftime("%d/%m/%Y %H:%M") if t["submitted_at"] else ""
     return f'<div class="sn-ev">{link}{note}<small>Registrado el {stamp}. Respaldo para ambas partes.</small></div>'
-
 
 def card(t, boss=False):
     s = t["status"]
@@ -235,22 +279,22 @@ def card(t, boss=False):
         pill = due_pill(t)
     else:
         pill = '<span class="sn-pill g">A tiempo</span>' if on_time(t) else '<span class="sn-pill o">Con retraso</span>'
+    
     extra = ""
     if s == "pendiente" and t["jefe_msg"]:
         extra = f'<div class="sn-note o"><b>Jefatura devolvió:</b> {esc(t["jefe_msg"])} El reloj sigue corriendo.</div>'
     if s == "revision" and not boss:
         extra = '<div class="sn-note b">Reloj detenido. Jefatura está revisando tu evidencia.</div>'
+        
     sub = f'Compromiso al {t["due"].strftime("%d/%m")}'
-    if boss:
-        sub = f'Dickson Medina. {sub}'
+    if boss: sub = f'Dickson Medina. {sub}'
+    
     md(f"""<div class="sn-row"><span class="sn-cat"><i class="sn-pd {t['prio']}"></i>{esc(t['cat'])}</span>{pill}</div>
     <div class="sn-title">{esc(t['title'])}</div><div class="sn-sub">{sub}</div>
     {stepper(s)}{extra}{evidence(t) if s != 'pendiente' else ''}""")
 
-
 def empty(title, text):
     md(f'<div class="sn-empty"><b>{title}</b>{text}</div>')
-
 
 def donut(pct):
     r = 46
@@ -263,10 +307,8 @@ def donut(pct):
             f'<text x="60" y="63" text-anchor="middle" class="sn-dn">{pct}%</text>'
             f'<text x="60" y="80" text-anchor="middle" class="sn-ds">oportuna</text></svg>')
 
-
 # ───────────────────────── Diálogos ─────────────────────────
 _dialog = getattr(st, "dialog", None) or getattr(st, "experimental_dialog")
-
 
 @_dialog("Cumplir compromiso")
 def dlg_cumplir(tid):
@@ -274,8 +316,8 @@ def dlg_cumplir(tid):
     md(f'<div class="sn-dlg-t">{esc(t["title"])}</div>'
        '<div class="sn-dlg-s">Al enviar, el reloj se detiene y Jefatura recibe tu evidencia con sello de fecha y hora.</div>')
     link = st.text_input("Enlace de evidencia (SharePoint o Drive)", placeholder="https://...", key=f"lnk_{tid}")
-    note = st.text_area("Nota breve", max_chars=280, height=90, key=f"nt_{tid}",
-                        placeholder="Qué se hizo, hallazgos o pendientes.")
+    note = st.text_area("Nota breve", max_chars=280, height=90, key=f"nt_{tid}", placeholder="Qué se hizo, hallazgos o pendientes.")
+    
     if st.button("Enviar a revisión", type="primary", key=f"send_{tid}"):
         link, note = link.strip(), note.strip()
         if not link and not note:
@@ -283,10 +325,10 @@ def dlg_cumplir(tid):
         elif link and not link.lower().startswith(("http://", "https://")):
             st.error("El enlace debe comenzar con https://")
         else:
-            t.update(status="revision", link=link, note=note, submitted_at=datetime.now(), jefe_msg="")
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+            actualizar_bd(tid, {"status": "revision", "link": link, "note": note, "submitted_at": now_str, "jefe_msg": ""})
             S.toast = ("Enviado a revisión. El reloj quedó detenido.", "📨")
             st.rerun()
-
 
 @_dialog("Devolver al funcionario")
 def dlg_devolver(tid):
@@ -294,14 +336,14 @@ def dlg_devolver(tid):
     md(f'<div class="sn-dlg-t">{esc(t["title"])}</div>'
        '<div class="sn-dlg-s">El compromiso vuelve a Pendiente y el reloj se reanuda.</div>')
     msg = st.text_area("¿Qué debe corregir?", max_chars=240, height=100, key=f"msg_{tid}")
+    
     if st.button("Devolver con comentario", type="primary", key=f"devok_{tid}"):
         if not msg.strip():
             st.error("Indica qué debe corregirse.")
         else:
-            t.update(status="pendiente", jefe_msg=msg.strip(), submitted_at=None, link="", note="")
+            actualizar_bd(tid, {"status": "pendiente", "jefe_msg": msg.strip(), "submitted_at": "", "link": "", "note": ""})
             S.toast = ("Devuelto al funcionario con tu comentario.", "↩️")
             st.rerun()
-
 
 # ───────────────────────── Vistas ─────────────────────────
 def vista_funcionario():
@@ -309,34 +351,30 @@ def vista_funcionario():
     rev, cer = by("revision"), by("cerrado")
     venc = sum(days_left(t) < 0 for t in pend)
     pronto = sum(0 <= days_left(t) <= 3 for t in pend)
-    msg = (f"Tienes <b>{venc}</b> vencido y <b>{pronto}</b> por vencer esta semana." if venc or pronto
-           else "Estás al día. Buen trabajo.")
+    msg = (f"Tienes <b>{venc}</b> vencido y <b>{pronto}</b> por vencer esta semana." if venc or pronto else "Estás al día. Buen trabajo.")
+    
     md(f"""<div class="sn-hero"><h2>Hola, Dickson</h2><p>{msg}</p>
     <div class="sn-cnt"><div class="{'w' if venc else ''}"><b>{len(pend)}</b><span>Por cumplir</span></div>
     <div><b>{len(rev)}</b><span>En revisión</span></div><div><b>{len(cer)}</b><span>Cerrados</span></div></div></div>""")
 
     t1, t2, t3 = st.tabs([f"Por cumplir ({len(pend)})", f"En revisión ({len(rev)})", f"Cerrados ({len(cer)})"])
     with t1:
-        if not pend:
-            empty("Sin pendientes", "Todo está en revisión o cerrado.")
+        if not pend: empty("Sin pendientes", "Todo está en revisión o cerrado.")
         for t in pend:
             with st.container(border=True):
                 card(t)
                 if st.button("Cumplir", type="primary", key=f"cum_{t['id']}"):
                     dlg_cumplir(t["id"])
     with t2:
-        if not rev:
-            empty("Nada en revisión", "Cuando reportes un cumplimiento aparecerá aquí.")
+        if not rev: empty("Nada en revisión", "Cuando reportes un cumplimiento aparecerá aquí.")
         for t in sorted(rev, key=lambda t: t["submitted_at"], reverse=True):
             with st.container(border=True):
                 card(t)
     with t3:
-        if not cer:
-            empty("Aún sin cierres", "Los compromisos aprobados se archivan aquí.")
+        if not cer: empty("Aún sin cierres", "Los compromisos aprobados se archivan aquí.")
         for t in sorted(cer, key=lambda t: t["closed_at"], reverse=True):
             with st.container(border=True):
                 card(t)
-
 
 def vista_jefatura():
     pct = eficiencia()
@@ -344,23 +382,23 @@ def vista_jefatura():
     dots = "".join(f'<i class="{"" if w else "x"}"></i>' for w in S.weeks)
     dots += f'<i class="cur {"" if cur_ok else "risk"}"></i>'
     gap = pct - META_EFICIENCIA
-    meta = (f"Superas la meta de {META_EFICIENCIA}% por <b>{gap} pts</b>" if gap >= 0
-            else f"Faltan <b>{-gap} pts</b> para la meta de {META_EFICIENCIA}%")
+    meta = (f"Superas la meta de {META_EFICIENCIA}% por <b>{gap} pts</b>" if gap >= 0 else f"Faltan <b>{-gap} pts</b> para la meta de {META_EFICIENCIA}%")
     riesgo = "" if cur_ok else " La semana actual está en riesgo por un compromiso vencido."
+    
     md(f"""<div class="sn-hero"><div class="sn-gauge">{donut(pct)}
     <div class="sn-streak"><b>{n} 🔥</b><small>semanas en racha</small><div class="sn-wk">{dots}</div></div></div>
     <div class="sn-meta">Eficiencia oportuna de Dickson Medina. {meta}.{riesgo}</div></div>""")
 
     rev, pend, cer = by("revision"), by("pendiente"), by("cerrado")
     venc = sum(days_left(t) < 0 for t in pend)
+    
     md(f"""<div class="sn-kpis"><div class="sn-kpi b"><b>{len(rev)}</b><span>Por validar</span></div>
     <div class="sn-kpi o"><b>{venc}</b><span>Vencidos</span></div>
     <div class="sn-kpi g"><b>{len(cer)}</b><span>Aprobados</span></div></div>""")
 
     t1, t2, t3 = st.tabs([f"Por validar ({len(rev)})", "Seguimiento", "Asignar"])
     with t1:
-        if not rev:
-            empty("Bandeja vacía", "No hay evidencia pendiente de tu validación.")
+        if not rev: empty("Bandeja vacía", "No hay evidencia pendiente de tu validación.")
         for t in sorted(rev, key=lambda t: t["submitted_at"]):
             with st.container(border=True):
                 card(t, boss=True)
@@ -368,36 +406,39 @@ def vista_jefatura():
                 if c1.button("Devolver", key=f"dev_{t['id']}"):
                     dlg_devolver(t["id"])
                 if c2.button("Aprobar", type="primary", key=f"ap_{t['id']}"):
-                    t.update(status="cerrado", closed_at=datetime.now())
+                    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    actualizar_bd(t["id"], {"status": "cerrado", "closed_at": now_str})
                     S.toast = ("Compromiso aprobado y cerrado.", "✅")
                     st.rerun()
     with t2:
         md('<div class="sn-sec">En la cancha del funcionario</div>')
-        rows = "".join(f'<div class="sn-li"><span>{esc(t["title"])}</span>{due_pill(t)}</div>'
-                       for t in sorted(pend, key=lambda t: t["due"]))
+        rows = "".join(f'<div class="sn-li"><span>{esc(t["title"])}</span>{due_pill(t)}</div>' for t in sorted(pend, key=lambda t: t["due"]))
         md(f'<div class="sn-box">{rows or "<div class=sn-empty>Sin pendientes.</div>"}</div>')
+        
         md('<div class="sn-sec">Cerrados recientemente</div>')
         rows = "".join(f'<div class="sn-li"><span>{esc(t["title"])}</span>'
                        f'<span class="sn-pill {"g" if on_time(t) else "o"}">{"A tiempo" if on_time(t) else "Tarde"}</span></div>'
                        for t in sorted(cer, key=lambda t: t["closed_at"], reverse=True))
-        md(f'<div class="sn-box">{rows}</div>')
+        md(f'<div class="sn-box">{rows or "<div class=sn-empty>No hay cerrados aún.</div>"}</div>')
     with t3:
         with st.form("nuevo", clear_on_submit=True):
             titulo = st.text_input("Compromiso", placeholder="Ej: Informe de cierre, Constructora Pacífico")
-            cat = st.selectbox("Categoría", ["1. Fiscalización", "2. Tareas Administrativas", "3.Gestión Documental", "4.Compromisos Personales",
-                                             "5. Acciones de Control", "6. Función Liquidadora", "7. Otros"])
+            
+            # Usando las 7 categorías exactas que pediste antes
+            cat = st.selectbox("Categoría", [
+                "Fiscalización", "Administrativas", "Gestión Documental", 
+                "Compromisos personales", "Acciones de Control", "Función Liquidadora", "Otros"
+            ])
             prio = st.selectbox("Prioridad", ["Alta", "Media", "Baja"], index=1)
             due = st.date_input("Fecha comprometida", value=TODAY + timedelta(days=7), min_value=TODAY)
+            
             if st.form_submit_button("Asignar compromiso", type="primary"):
                 if not titulo.strip():
                     st.error("Escribe el compromiso.")
                 else:
-                    tasks.append(dict(id=S.seq, title=titulo.strip(), cat=cat, prio=prio, due=due, status="pendiente",
-                                      submitted_at=None, closed_at=None, link="", note="", jefe_msg=""))
-                    S.seq += 1
+                    agregar_bd(titulo.strip(), cat, prio, due)
                     S.toast = ("Compromiso asignado a Dickson.", "📌")
                     st.rerun()
-
 
 # ───────────────────────── App ─────────────────────────
 if S.get("toast"):
