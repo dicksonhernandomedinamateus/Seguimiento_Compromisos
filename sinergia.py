@@ -6,6 +6,23 @@ from html import escape as esc
 import streamlit as st
 import streamlit.components.v1 as components
 
+import json
+import gspread
+from google.oauth2.service_account import Credentials
+
+# --- CONEXIÓN A GOOGLE SHEETS ---
+try:
+    credenciales_dict = json.loads(st.secrets["google_sheets_cred"])
+    alcance = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+    credenciales = Credentials.from_service_account_info(credenciales_dict, scopes=alcance)
+    cliente = gspread.authorize(credenciales)
+    
+    # Conectamos con el ID de tu archivo
+    hoja_db = cliente.open_by_key("1mfFWfyTRnwBkavxfD_nUDZch1S9bnA8ODmAoXmMnUfo").sheet1
+except Exception as e:
+    st.error("Error conectando a la base de datos. Verifica los Secrets.")
+# --------------------------------
+
 st.set_page_config(page_title="Sinergia", page_icon="🧭", layout="centered",
                    initial_sidebar_state="collapsed")
 
