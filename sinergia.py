@@ -367,8 +367,8 @@ def vista_jefatura():
     with t3:
         with st.form("nuevo", clear_on_submit=True):
             titulo = st.text_input("Compromiso", placeholder="Ej: Informe de cierre, Constructora Pacífico")
-            cat = st.selectbox("Categoría", ["Fiscalización IVA", "Renta", "Citaciones", "Terreno",
-                                             "Análisis de riesgo", "Gestión interna"])
+            cat = st.selectbox("Categoría", ["1. Fiscalización", "2. Tareas Administrativas", "3.Gestión Documental", "4.Compromisos Personales",
+                                             "5. Acciones de Control", "6. Función Liquidadora", "7. Otros"])
             prio = st.selectbox("Prioridad", ["Alta", "Media", "Baja"], index=1)
             due = st.date_input("Fecha comprometida", value=TODAY + timedelta(days=7), min_value=TODAY)
             if st.form_submit_button("Asignar compromiso", type="primary"):
